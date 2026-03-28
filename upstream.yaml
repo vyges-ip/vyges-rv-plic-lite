@@ -1,0 +1,18 @@
+schema_version: "vyges-upstream-v1"
+upstream:
+  type: "standalone"
+  repo: https://github.com/vyges/vyges-rv-plic-lite
+  branch: main
+  commit: 92153b24474ae56b54b54afd88bfe7f215e2ec52
+  extracted_at: "2026-03-28T01:51:07Z"
+import:
+  rtl:
+    - path: "rtl"
+      map_to: "rtl"
+  license:
+    - path: "LICENSE"
+  readme:
+    - path: "README.md"
+license:
+  spdx: Apache-2.0
+  file: LICENSE
