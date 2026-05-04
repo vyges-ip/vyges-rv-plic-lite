@@ -3,7 +3,7 @@ upstream:
   type: "standalone"
   repo: https://github.com/vyges/vyges-rv-plic-lite
   branch: main
-  commit: c1079a438fd2ed508f34edd45fa05c5a2a720f66
+  commit: 6c0af49b166499fd7174aab0f5b836632b0db5b3
   extracted_at: "2026-03-28T01:51:07Z"
 import:
   rtl:
