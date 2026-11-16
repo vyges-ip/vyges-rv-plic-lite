@@ -68,8 +68,8 @@ module rv_plic_lite
   // Priority arbiter — find the highest-priority pending+enabled source whose
   // priority exceeds the threshold.  Source 0 is reserved (no interrupt) per
   // the RISC-V PLIC spec, so valid IDs are 1..NUM_SOURCES-1 when NUM_SOURCES
-  // includes ID 0 as "no interrupt".  For simplicity we treat all NUM_SOURCES
-  // entries uniformly; software should keep prio[0] = 0.
+  // includes ID 0 as "no interrupt".  Source 0 is excluded from arbitration
+  // so that a claim can never return it.
   // ---------------------------------------------------------------------------
   logic [4:0]  best_id;
   logic [2:0]  best_prio;
@@ -104,7 +104,7 @@ module rv_plic_lite
   logic [2:0] elig_prio [NUM_SOURCES];
   always_comb begin
     for (int unsigned i = 0; i < NUM_SOURCES; i++) begin
-      elig_prio[i] = (pending[i] && enable[i] && (prio[i] > threshold)) ? prio[i] : 3'd0;
+      elig_prio[i] = (pending[i] && enable[i] && (prio[i] > threshold) && (i != 0)) ? prio[i] : 3'd0;
     end
   end
 
@@ -180,6 +180,7 @@ module rv_plic_lite
   // Matching spi-host-lite's registered pattern resolves it -- response
   // arrives one cycle after the request, through a clean flip-flop.
   // ---------------------------------------------------------------------------
+  logic        rsp_valid;
   logic        tl_req;
   logic        tl_we;
   logic [31:0] tl_addr;
@@ -187,13 +188,26 @@ module rv_plic_lite
   logic [31:0] tl_rdata;
   logic        tl_err;
 
-  assign tl_req   = tl_i.a_valid;
+  // best_id is one cycle behind pending, enable and threshold. Re-check the
+  // winner at the claim, and return 0 (no interrupt) if it is no longer valid.
+  logic        claim_ok;
+  assign claim_ok = irq_valid && pending[best_id] && enable[best_id] && (prio[best_id] > threshold);
+
+  // A request is accepted only when the response slot is free or being
+  // consumed, so a response the host has stalled is never overwritten.
+  logic        tl_a_ready;
+  assign tl_a_ready = !rsp_valid || tl_i.d_ready;
+  assign tl_req   = tl_i.a_valid && tl_a_ready;
   assign tl_we    = (tl_i.a_opcode == PutFullData) || (tl_i.a_opcode == PutPartialData);
   assign tl_addr  = {20'b0, tl_i.a_address[11:0]}; // use lower 12 bits
   assign tl_wdata = tl_i.a_data;
 
-  // Registered response state
-  logic        rsp_valid;
+  // Byte enables. Priority, threshold and completion live in byte 0.
+  logic [3:0]  tl_mask;
+  logic [31:0] tl_wmask;
+  assign tl_mask  = tl_i.a_mask;
+  assign tl_wmask = {{8{tl_mask[3]}}, {8{tl_mask[2]}}, {8{tl_mask[1]}}, {8{tl_mask[0]}}};
+
   logic [31:0] rsp_rdata;
   logic        rsp_error;
   logic [7:0]  rsp_source_q;
@@ -208,7 +222,7 @@ module rv_plic_lite
       rsp_source_q <= '0;
       rsp_size_q   <= '0;
       rsp_write_q  <= 1'b0;
-    end else begin
+    end else if (tl_a_ready) begin
       rsp_valid    <= tl_req;
       rsp_rdata    <= tl_rdata;
       rsp_error    <= tl_err;
@@ -223,7 +237,7 @@ module rv_plic_lite
   // core-ibex) accepts this slave's d-channel on a signed TL-UL domain.
   tlul_pkg::tl_d2h_t tl_o_pre;
   assign tl_o_pre.d_valid  = rsp_valid;
-  assign tl_o_pre.a_ready  = 1'b1;
+  assign tl_o_pre.a_ready  = tl_a_ready;
   assign tl_o_pre.d_opcode = rsp_write_q ? AccessAck : AccessAckData;
   assign tl_o_pre.d_param  = '0;
   assign tl_o_pre.d_size   = rsp_size_q;
@@ -253,7 +267,10 @@ module rv_plic_lite
         // Priority registers 0x000 – 0x07C
         12'h0??: begin
           if (tl_addr[11:0] <= ADDR_PRIO_END[11:0]) begin
-            tl_rdata = {29'b0, prio[tl_addr[6:2]]};
+            // Registers above NUM_SOURCES are not implemented: they read 0.
+            if (tl_addr[6:2] < NUM_SOURCES) begin
+              tl_rdata = {29'b0, prio[tl_addr[6:2]]};
+            end
           end else if (tl_addr[11:0] == ADDR_PENDING[11:0]) begin
             tl_rdata = pending;
           end else begin
@@ -262,7 +279,7 @@ module rv_plic_lite
         end
         12'h100: tl_rdata = enable;
         12'h200: tl_rdata = {29'b0, threshold};
-        12'h204: tl_rdata = irq_valid ? {27'b0, best_id} : 32'b0;
+        12'h204: tl_rdata = claim_ok ? {27'b0, best_id} : 32'b0;
         default: tl_err = 1'b1;
       endcase
     end
@@ -281,7 +298,7 @@ module rv_plic_lite
       claimed   <= '0;
     end else begin
       // --- Claim on read of CLAIM_COMPLETE register ---
-      if (tl_req && !tl_we && (tl_addr[11:0] == ADDR_CLAIM_COMPLETE[11:0]) && irq_valid) begin
+      if (tl_req && !tl_we && (tl_addr[11:0] == ADDR_CLAIM_COMPLETE[11:0]) && claim_ok) begin
         claimed[best_id] <= 1'b1;
       end
 
@@ -289,16 +306,18 @@ module rv_plic_lite
       if (tl_req && tl_we) begin
         unique casez (tl_addr[11:0])
           12'h0??: begin
-            if (tl_addr[11:0] <= ADDR_PRIO_END[11:0]) begin
+            if ((tl_addr[11:0] <= ADDR_PRIO_END[11:0]) && tl_mask[0] && (tl_addr[6:2] < NUM_SOURCES)) begin
               prio[tl_addr[6:2]] <= tl_wdata[2:0];
             end
           end
           // PENDING (0x080) is read-only — writes are silently ignored
-          12'h100: enable    <= tl_wdata;
-          12'h200: threshold <= tl_wdata[2:0];
+          12'h100: enable    <= (enable & ~tl_wmask) | (tl_wdata & tl_wmask);
+          12'h200: if (tl_mask[0]) threshold <= tl_wdata[2:0];
           12'h204: begin
-            // Complete: clear claimed bit for the written source ID
-            if (tl_wdata[4:0] < NUM_SOURCES[4:0]) begin
+            // Complete: clear claimed bit for the written source ID. Compare
+            // the whole word: NUM_SOURCES can be 32, which does not fit in
+            // five bits, and an out-of-range ID must not alias a real source.
+            if (tl_mask[0] && ((tl_wdata & tl_wmask) < NUM_SOURCES)) begin
               claimed[tl_wdata[4:0]] <= 1'b0;
             end
           end

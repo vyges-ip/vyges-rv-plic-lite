@@ -5,19 +5,19 @@ Vyges-original IP, no OpenTitan RACL or lifecycle dependencies.
 
 ## Features
 
-- Up to 32 external interrupt sources (configurable via `NUM_SOURCES`)
+- Up to 31 external interrupt sources, IDs 1 to `NUM_SOURCES`-1 (ID 0 means no interrupt and never fires)
 - 3-bit priority per source (0 = disabled, 7 = highest)
 - Priority threshold register
 - Interrupt pending (RO) and enable (RW) bitmaps
 - Claim/complete mechanism per the RISC-V PLIC specification
 - Single `irq_o` output for one hart target
-- Single-cycle TL-UL response (always ready)
+- Registered one-cycle TL-UL response; a stalled response is held until the host accepts it
 
 ## Register Map
 
 | Offset        | Name             | Access | Description                                       |
 |---------------|------------------|--------|---------------------------------------------------|
-| 0x000 - 0x07C | PRIO[0..31]     | RW     | 3-bit priority for each source (one word each)    |
+| 0x000 - 0x07C | PRIO[0..31]     | RW     | 3-bit priority for each source (one word each); registers at or above NUM_SOURCES read 0 and ignore writes |
 | 0x080         | PENDING          | RO     | 32-bit pending interrupt bitmap                   |
 | 0x100         | ENABLE           | RW     | 32-bit interrupt enable bitmap                    |
 | 0x200         | THRESHOLD        | RW     | 3-bit priority threshold                          |
@@ -27,7 +27,7 @@ Vyges-original IP, no OpenTitan RACL or lifecycle dependencies.
 
 | Parameter    | Default | Range | Description                      |
 |--------------|---------|-------|----------------------------------|
-| NUM_SOURCES  | 32      | 1-32  | Number of external interrupt sources |
+| NUM_SOURCES  | 32      | 1-32  | Number of interrupt IDs, including reserved ID 0 |
 
 ## Claim/Complete Protocol
 
@@ -35,7 +35,7 @@ Vyges-original IP, no OpenTitan RACL or lifecycle dependencies.
 2. CPU services the interrupt.
 3. CPU writes the source ID back to `CLAIM_COMPLETE` (0x204) to signal completion. The claimed bit is cleared, allowing the source to pend again if still asserted.
 
-Reading `CLAIM_COMPLETE` when no interrupt is pending returns 0.
+Reading `CLAIM_COMPLETE` when no interrupt is pending returns 0. It also returns 0, and claims nothing, if the arbiter's winner stopped being eligible in the cycle before the read.
 
 ## Dependencies
 
